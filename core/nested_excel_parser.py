@@ -1,199 +1,247 @@
 """
-AutoArchitect - 계층형(Nested) 엑셀 파서
-BOXES 시트를 읽어 계층 구조 파싱
+AutoArchitect - Excel Parser (완전판)
+v5.0 (X%, 너비% 기반) + v6.0 (행번호 기반) 모두 지원
 """
 
 import pandas as pd
-from typing import Dict, List, Any
+from typing import Dict, Any, List
 import io
-
-from utils.constants import COLOR_MAP, BORDER_COLOR_MAP
 
 
 class NestedExcelParser:
-    """계층형 구조를 지원하는 엑셀 파서"""
+    """v5.0과 v6.0 엑셀 구조 모두 지원하는 Parser (완전판)"""
 
     def __init__(self):
-        self.errors = []
-        self.warnings = []
-        self.infos = []
+        self.excel_version = None  # 'v5' 또는 'v6'
 
-    def read_excel(self, file_path) -> Dict[str, pd.DataFrame]:
-        """엑셀 파일 읽기"""
-        self.errors = []
-        self.warnings = []
-        self.infos = []
+    def read_excel(self, file) -> Dict[str, pd.DataFrame]:
+        """엑셀 파일을 읽어 시트별 DataFrame 반환"""
+        sheets = {}
 
-        try:
-            # Streamlit UploadedFile 처리
-            if hasattr(file_path, 'read'):
-                # UploadedFile을 직접 pandas에 전달
-                excel_file = pd.ExcelFile(file_path, engine='openpyxl')
-            else:
-                # 일반 파일 경로
-                excel_file = pd.ExcelFile(file_path, engine='openpyxl')
+        # 파일 타입 확인
+        if hasattr(file, 'read'):
+            # UploadedFile 객체
+            excel_file = pd.ExcelFile(file)
+        else:
+            # 파일 경로
+            excel_file = pd.ExcelFile(file)
 
-            sheets = {}
+        # 모든 시트 읽기
+        for sheet_name in excel_file.sheet_names:
+            sheets[sheet_name] = pd.read_excel(excel_file, sheet_name=sheet_name)
 
-            for sheet_name in excel_file.sheet_names:
-                if sheet_name == 'GUIDE':
-                    continue
-                df = pd.read_excel(excel_file, sheet_name=sheet_name, engine='openpyxl')
-                df = df.dropna(how='all')
-                sheets[sheet_name] = df
-
-            excel_file.close()
-
-            # 필수 시트 확인
-            required = ['CONFIG', 'LAYERS', 'BOXES', 'COMPONENTS']
-            for sheet in required:
-                if sheet not in sheets:
-                    self.errors.append(f"{sheet} 시트가 없습니다.")
-
-            return sheets
-
-        except Exception as e:
-            import traceback
-            error_detail = traceback.format_exc()
-            self.errors.append(f"엑셀 파일 읽기 실패: {str(e)}\n{error_detail}")
-            return {}
+        return sheets
 
     def validate_data(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
         """데이터 검증"""
-        if self.errors or not sheets:
-            if not sheets and not self.errors:
-                self.errors.append("엑셀 파일에서 시트를 찾을 수 없습니다.")
+        errors = []
+        warnings = []
+        infos = []  # 정보성 메시지
+
+        # 필수 시트 확인
+        required_sheets = ['CONFIG', 'LAYERS', 'BOXES']
+        for sheet in required_sheets:
+            if sheet not in sheets:
+                errors.append(f"필수 시트 '{sheet}'가 없습니다.")
+
+        if errors:
             return {
                 'is_valid': False,
-                'errors': self.errors,
-                'warnings': self.warnings,
-                'infos': self.infos
+                'errors': errors,
+                'warnings': warnings,
+                'infos': infos
             }
 
-        # BOXES 검증
-        if 'BOXES' in sheets:
-            self._validate_boxes(sheets['BOXES'])
+        # 버전 감지
+        self._detect_version(sheets)
 
-        # COMPONENTS 검증
-        if 'COMPONENTS' in sheets and 'BOXES' in sheets:
-            self._validate_components(sheets['COMPONENTS'], sheets['BOXES'])
+        # 버전 정보 추가
+        if self.excel_version == 'v6':
+            infos.append("✅ v6.0 엑셀 형식 (행 기반 자동 레이아웃)")
+        else:
+            infos.append("✅ v5.0 엑셀 형식 (X%, 너비% 기반)")
+
+        # BOXES 시트 검증
+        if 'BOXES' in sheets:
+            df = sheets['BOXES']
+
+            # v6.0 필수 컬럼
+            if self.excel_version == 'v6':
+                required_cols = ['박스ID', '박스명', '부모ID', '행번호', 'Y%', '높이%']
+            else:
+                # v5.0 필수 컬럼
+                required_cols = ['박스ID', '박스명', '부모ID', 'X%', 'Y%', '너비%', '높이%']
+
+            for col in required_cols:
+                if col not in df.columns:
+                    errors.append(f"BOXES 시트에 '{col}' 컬럼이 없습니다.")
+
+            if len(errors) == 0:
+                infos.append(f"📦 박스 개수: {len(df)}개")
+
+        # LAYERS 시트 검증
+        if 'LAYERS' in sheets:
+            df = sheets['LAYERS']
+            required_cols = ['레이어ID', '레이어명', '순서', '배경색', '높이%']
+            for col in required_cols:
+                if col not in df.columns:
+                    errors.append(f"LAYERS 시트에 '{col}' 컬럼이 없습니다.")
+
+            if len(errors) == 0:
+                infos.append(f"🗂️ 레이어 개수: {len(df)}개")
+
+        # COMPONENTS 시트 확인 (선택사항)
+        if 'COMPONENTS' in sheets:
+            df = sheets['COMPONENTS']
+            infos.append(f"📋 컴포넌트 개수: {len(df)}개")
 
         return {
-            'is_valid': len(self.errors) == 0,
-            'errors': self.errors,
-            'warnings': self.warnings,
-            'infos': self.infos
+            'is_valid': len(errors) == 0,
+            'errors': errors,
+            'warnings': warnings,
+            'infos': infos
         }
-
-    def _validate_boxes(self, df: pd.DataFrame):
-        """BOXES 검증"""
-        # ID 중복 체크
-        box_ids = df['박스ID'].dropna()
-        duplicates = box_ids[box_ids.duplicated()].unique()
-        for dup in duplicates:
-            self.errors.append(f"박스ID 중복: {dup}")
-
-        # 부모 참조 체크
-        valid_ids = set(box_ids)
-        valid_ids.add('L1')  # 레이어도 부모가 될 수 있음
-        valid_ids.add('L2')
-
-        for idx, row in df.iterrows():
-            parent_id = row.get('부모ID')
-            if pd.notna(parent_id) and parent_id not in valid_ids:
-                self.errors.append(f"박스 {row['박스ID']}: 존재하지 않는 부모ID '{parent_id}'")
-
-    def _validate_components(self, comp_df: pd.DataFrame, box_df: pd.DataFrame):
-        """COMPONENTS 검증"""
-        valid_parents = set(box_df['박스ID'].dropna())
-
-        for idx, row in comp_df.iterrows():
-            parent_id = row.get('부모ID')
-            if pd.notna(parent_id) and parent_id not in valid_parents:
-                self.errors.append(f"컴포넌트 {row['ID']}: 존재하지 않는 부모ID '{parent_id}'")
 
     def parse_to_dict(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
-        """계층 구조를 Dict로 변환"""
-        result = {
-            'config': {},
-            'layers': [],
-            'boxes': [],
-            'components': [],
-            'connections': []
-        }
+        """엑셀 시트를 딕셔너리로 변환 (v5/v6 자동 감지)"""
 
-        # CONFIG
+        # 버전 자동 감지
+        self._detect_version(sheets)
+
+        result = {}
+
+        # CONFIG 파싱
         if 'CONFIG' in sheets:
-            config_df = sheets['CONFIG']
-            result['config'] = dict(zip(config_df['항목'], config_df['값']))
+            result['config'] = self._parse_config(sheets['CONFIG'])
 
-        # LAYERS
+        # LAYERS 파싱
         if 'LAYERS' in sheets:
-            layers_df = sheets['LAYERS']
-            result['layers'] = [
-                {
-                    'id': row['레이어ID'],
-                    'name': row['레이어명'],
-                    'order': row['순서'],
-                    'bg_color': row['배경색'],
-                    'height_percent': row['높이%']
-                }
-                for _, row in layers_df.iterrows()
-                if pd.notna(row['레이어ID'])
-            ]
+            result['layers'] = self._parse_layers(sheets['LAYERS'])
 
-        # BOXES
+        # BOXES 파싱 (버전별 처리)
         if 'BOXES' in sheets:
-            boxes_df = sheets['BOXES']
-            result['boxes'] = [
-                {
-                    'id': row['박스ID'],
-                    'name': row['박스명'],
-                    'parent_id': row['부모ID'],
-                    'x_percent': row['X%'],
-                    'y_percent': row['Y%'],
-                    'width_percent': row['너비%'],
-                    'height_percent': row['높이%'],
-                    'bg_color': row.get('배경색', '흰색'),
-                    'border_color': row.get('테두리색', '회색'),
-                    'font_size': row.get('폰트크기', 11)
-                }
-                for _, row in boxes_df.iterrows()
-                if pd.notna(row['박스ID'])
-            ]
+            result['boxes'] = self._parse_boxes(sheets['BOXES'])
 
-        # COMPONENTS
+        # COMPONENTS 파싱 (버전별 처리)
         if 'COMPONENTS' in sheets:
-            comp_df = sheets['COMPONENTS']
-            result['components'] = [
-                {
-                    'id': row['ID'],
-                    'name': row['컴포넌트명'],
-                    'parent_id': row['부모ID'],
-                    'x_percent': row['X%'],
-                    'y_percent': row['Y%'],
-                    'width_percent': row['너비%'],
-                    'height_percent': row['높이%'],
-                    'font_size': row.get('폰트크기', 10),
-                    'type': row.get('타입', '단일박스')
-                }
-                for _, row in comp_df.iterrows()
-                if pd.notna(row['ID'])
-            ]
+            result['components'] = self._parse_components(sheets['COMPONENTS'])
+        else:
+            result['components'] = []  # COMPONENTS가 없을 수도 있음
 
-        # CONNECTIONS
+        # CONNECTIONS 파싱
         if 'CONNECTIONS' in sheets:
-            conn_df = sheets['CONNECTIONS']
-            result['connections'] = [
-                {
-                    'from_id': row['출발ID'],
-                    'to_id': row['도착ID'],
-                    'type': row['연결타입'],
-                    'label': row.get('라벨', ''),
-                    'style': row.get('선스타일', '실선')
-                }
-                for _, row in conn_df.iterrows()
-                if pd.notna(row['출발ID']) and pd.notna(row['도착ID'])
-            ]
+            result['connections'] = self._parse_connections(sheets['CONNECTIONS'])
+        else:
+            result['connections'] = []  # CONNECTIONS가 없을 수도 있음
 
         return result
+
+    def _detect_version(self, sheets: Dict[str, pd.DataFrame]):
+        """엑셀 버전 자동 감지"""
+        if 'BOXES' in sheets:
+            df = sheets['BOXES']
+            # v6.0은 '행번호' 컬럼이 있고 'X%'가 없음
+            if '행번호' in df.columns and 'X%' not in df.columns:
+                self.excel_version = 'v6'
+                print("📋 v6.0 엑셀 형식 감지 (행 기반)")
+            else:
+                self.excel_version = 'v5'
+                print("📋 v5.0 엑셀 형식 감지 (X%, 너비% 기반)")
+
+    def _parse_config(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """CONFIG 시트 파싱"""
+        config = {}
+        for _, row in df.iterrows():
+            key = row['항목']
+            value = row['값']
+            config[key] = value
+        return config
+
+    def _parse_layers(self, df: pd.DataFrame) -> List[Dict]:
+        """LAYERS 시트 파싱"""
+        layers = []
+        for _, row in df.iterrows():
+            layer = {
+                'id': row['레이어ID'],
+                'name': row['레이어명'],
+                'order': row['순서'],
+                'bg_color': row['배경색'],
+                'height_percent': row['높이%']
+            }
+            layers.append(layer)
+        return layers
+
+    def _parse_boxes(self, df: pd.DataFrame) -> List[Dict]:
+        """BOXES 시트 파싱 (v5/v6 자동 처리)"""
+        boxes = []
+
+        for _, row in df.iterrows():
+            box = {
+                'id': row['박스ID'],
+                'name': row['박스명'],
+                'parent_id': row['부모ID'],
+                'y_percent': row['Y%'],
+                'height_percent': row['높이%'],
+                'bg_color': row['배경색'],
+                'border_color': row['테두리색'],
+                'font_size': row['폰트크기']
+            }
+
+            # 버전별 추가 필드
+            if self.excel_version == 'v6':
+                # v6.0: 행번호 사용
+                box['row_number'] = row['행번호']
+                # x_percent, width_percent는 나중에 계산
+            else:
+                # v5.0: X%, 너비% 직접 사용
+                box['x_percent'] = row['X%']
+                box['width_percent'] = row['너비%']
+
+            boxes.append(box)
+
+        return boxes
+
+    def _parse_components(self, df: pd.DataFrame) -> List[Dict]:
+        """COMPONENTS 시트 파싱 (v5/v6 자동 처리)"""
+        components = []
+
+        for _, row in df.iterrows():
+            comp = {
+                'id': row['ID'],
+                'name': row['컴포넌트명'],
+                'parent_id': row['부모ID'],
+                'y_percent': row['Y%'],
+                'height_percent': row['높이%'],
+                'font_size': row['폰트크기'],
+                'type': row['타입']
+            }
+
+            # 버전별 추가 필드
+            if self.excel_version == 'v6':
+                # v6.0: 행번호 사용
+                comp['row_number'] = row['행번호']
+                # x_percent, width_percent는 나중에 계산
+            else:
+                # v5.0: X%, 너비% 직접 사용
+                comp['x_percent'] = row['X%']
+                comp['width_percent'] = row['너비%']
+
+            components.append(comp)
+
+        return components
+
+    def _parse_connections(self, df: pd.DataFrame) -> List[Dict]:
+        """CONNECTIONS 시트 파싱"""
+        connections = []
+
+        for _, row in df.iterrows():
+            conn = {
+                'from_id': row['출발ID'],
+                'to_id': row['도착ID'],
+                'type': row['연결타입'],
+                'label': row['라벨'],
+                'style': row['선스타일']
+            }
+            connections.append(conn)
+
+        return connections

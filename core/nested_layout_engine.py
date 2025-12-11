@@ -1,130 +1,215 @@
 """
-AutoArchitect - 계층형 레이아웃 엔진
-% 기반으로 절대 좌표 계산
+AutoArchitect - 통합 Layout Engine
+v5.0 (X%, 너비% 기반) + v6.0 (행번호 기반) 모두 지원
 """
 
 from typing import Dict, List, Any
+import pandas as pd
 
 
-class NestedLayoutEngine:
-    """계층 구조를 지원하는 레이아웃 엔진"""
+class UnifiedLayoutEngine:
+    """v5.0과 v6.0 레이아웃 모두 지원하는 통합 엔진"""
 
-    def __init__(self):
-        self.positions = {}
-        self.canvas_width = 1200
-        self.canvas_height = 900
-
-    def calculate_positions(self, data: Dict[str, Any]) -> Dict[str, Dict]:
-        """
-        모든 요소의 절대 좌표 계산
-        % 기반 → 픽셀 좌표 변환
-        """
+    def __init__(self, canvas_width: int, canvas_height: int, excel_version: str = 'v5'):
+        self.canvas_width = canvas_width
+        self.canvas_height = canvas_height
+        self.excel_version = excel_version
         self.positions = {}
 
-        self.canvas_width = data['config'].get('캔버스너비', 1200)
-        self.canvas_height = data['config'].get('캔버스높이', 900)
+        # v6.0 레이아웃 설정
+        self.LEFT_MARGIN = 5
+        self.RIGHT_MARGIN = 5
+        self.GAP = 2
 
-        # 1. 레이어 배치
+    def calculate_all_positions(self, data: Dict[str, Any]) -> Dict[str, Dict]:
+        """모든 요소의 위치 계산 (버전 자동 감지)"""
+        self.positions = {}
+
+        # 버전 자동 감지 (data에서)
+        if 'boxes' in data and len(data['boxes']) > 0:
+            first_box = data['boxes'][0]
+            if 'row_number' in first_box:
+                self.excel_version = 'v6'
+            else:
+                self.excel_version = 'v5'
+
+        print(f"🔧 Layout Engine: {self.excel_version} 모드")
+
+        # 1. 레이어 위치 계산
         self._calculate_layer_positions(data['layers'])
 
-        # 2. 박스 배치 (재귀적으로)
-        self._calculate_box_positions(data['boxes'], data['layers'])
+        # 2. 박스 위치 계산 (버전별)
+        if self.excel_version == 'v6':
+            self._calculate_boxes_v6(data['boxes'])
+        else:
+            self._calculate_boxes_v5(data['boxes'])
 
-        # 3. 컴포넌트 배치
-        self._calculate_component_positions(data['components'])
+        # 3. 컴포넌트 위치 계산 (버전별)
+        if self.excel_version == 'v6':
+            self._calculate_components_v6(data['components'])
+        else:
+            self._calculate_components_v5(data['components'])
 
         return self.positions
 
     def _calculate_layer_positions(self, layers: List[Dict]):
-        """레이어 절대 좌표 계산"""
-        total_height = sum(layer['height_percent'] for layer in layers)
+        """레이어 위치 계산 (공통)"""
         current_y = 0
 
-        for layer in sorted(layers, key=lambda l: l['order']):
-            height = (layer['height_percent'] / total_height) * self.canvas_height
+        for layer in layers:
+            layer_id = layer['id']
+            height_percent = layer['height_percent']
 
-            self.positions[layer['id']] = {
+            height_px = self.canvas_height * (height_percent / 100)
+
+            self.positions[layer_id] = {
                 'x': 0,
                 'y': current_y,
                 'width': self.canvas_width,
-                'height': height,
-                'abs_x': 0,
-                'abs_y': current_y,
-                'abs_width': self.canvas_width,
-                'abs_height': height
+                'height': height_px
             }
 
-            current_y += height
+            current_y += height_px
 
-    def _calculate_box_positions(self, boxes: List[Dict], layers: List[Dict]):
-        """박스 절대 좌표 계산 (재귀)"""
-        # 부모별로 그룹화
-        by_parent = {}
+    # ==================== v5.0 방식 ====================
+
+    def _calculate_boxes_v5(self, boxes: List[Dict]):
+        """v5.0: X%, 너비% 직접 사용"""
         for box in boxes:
-            parent_id = box['parent_id']
-            if parent_id not in by_parent:
-                by_parent[parent_id] = []
-            by_parent[parent_id].append(box)
+            parent_id = box.get('parent_id')
 
-        # 레이어 자식부터 계산
-        for layer in layers:
-            if layer['id'] in by_parent:
-                for box in by_parent[layer['id']]:
-                    self._calculate_box_recursive(box, by_parent, layer['id'])
+            # 부모 영역
+            if parent_id and parent_id in self.positions:
+                parent_pos = self.positions[parent_id]
+            else:
+                parent_pos = {
+                    'x': 0,
+                    'y': 0,
+                    'width': self.canvas_width,
+                    'height': self.canvas_height
+                }
 
-    def _calculate_box_recursive(self, box: Dict, by_parent: Dict, parent_id: str):
-        """재귀적으로 박스 위치 계산"""
-        # 부모 위치 가져오기
-        parent_pos = self.positions.get(parent_id)
-        if not parent_pos:
-            return
+            # 절대 위치 계산
+            x_px = parent_pos['x'] + (parent_pos['width'] * (box['x_percent'] / 100))
+            y_px = parent_pos['y'] + (parent_pos['height'] * (box['y_percent'] / 100))
+            width_px = parent_pos['width'] * (box['width_percent'] / 100)
+            height_px = parent_pos['height'] * (box['height_percent'] / 100)
 
-        # % → 픽셀 변환
-        x = parent_pos['abs_x'] + (box['x_percent'] / 100) * parent_pos['abs_width']
-        y = parent_pos['abs_y'] + (box['y_percent'] / 100) * parent_pos['abs_height']
-        width = (box['width_percent'] / 100) * parent_pos['abs_width']
-        height = (box['height_percent'] / 100) * parent_pos['abs_height']
+            self.positions[box['id']] = {
+                'x': x_px,
+                'y': y_px,
+                'width': width_px,
+                'height': height_px
+            }
 
-        self.positions[box['id']] = {
-            'x': x,
-            'y': y,
-            'width': width,
-            'height': height,
-            'abs_x': x,
-            'abs_y': y,
-            'abs_width': width,
-            'abs_height': height,
-            'parent_id': parent_id
-        }
-
-        # 자식 박스 계산
-        if box['id'] in by_parent:
-            for child_box in by_parent[box['id']]:
-                self._calculate_box_recursive(child_box, by_parent, box['id'])
-
-    def _calculate_component_positions(self, components: List[Dict]):
-        """컴포넌트 절대 좌표 계산"""
+    def _calculate_components_v5(self, components: List[Dict]):
+        """v5.0: X%, 너비% 직접 사용"""
         for comp in components:
-            parent_id = comp['parent_id']
-            parent_pos = self.positions.get(parent_id)
+            parent_id = comp.get('parent_id')
 
-            if not parent_pos:
+            # 부모 영역
+            if parent_id and parent_id in self.positions:
+                parent_pos = self.positions[parent_id]
+            else:
                 continue
 
-            # % → 픽셀 변환
-            x = parent_pos['abs_x'] + (comp['x_percent'] / 100) * parent_pos['abs_width']
-            y = parent_pos['abs_y'] + (comp['y_percent'] / 100) * parent_pos['abs_height']
-            width = (comp['width_percent'] / 100) * parent_pos['abs_width']
-            height = (comp['height_percent'] / 100) * parent_pos['abs_height']
+            # 절대 위치 계산
+            x_px = parent_pos['x'] + (parent_pos['width'] * (comp['x_percent'] / 100))
+            y_px = parent_pos['y'] + (parent_pos['height'] * (comp['y_percent'] / 100))
+            width_px = parent_pos['width'] * (comp['width_percent'] / 100)
+            height_px = parent_pos['height'] * (comp['height_percent'] / 100)
 
             self.positions[comp['id']] = {
-                'x': x,
-                'y': y,
-                'width': width,
-                'height': height,
-                'abs_x': x,
-                'abs_y': y,
-                'abs_width': width,
-                'abs_height': height,
-                'parent_id': parent_id
+                'x': x_px,
+                'y': y_px,
+                'width': width_px,
+                'height': height_px
+            }
+
+    # ==================== v6.0 방식 ====================
+
+    def _calculate_boxes_v6(self, boxes: List[Dict]):
+        """v6.0: 행 기반 자동 배치"""
+        # 부모별로 그룹화
+        parent_groups = {}
+        for box in boxes:
+            parent_id = box.get('parent_id')
+            if parent_id not in parent_groups:
+                parent_groups[parent_id] = []
+            parent_groups[parent_id].append(box)
+
+        # 각 그룹 내에서 행 기반 배치
+        for parent_id, children in parent_groups.items():
+            self._layout_items_by_row(children, parent_id)
+
+    def _calculate_components_v6(self, components: List[Dict]):
+        """v6.0: 행 기반 자동 배치"""
+        # 부모별로 그룹화
+        parent_groups = {}
+        for comp in components:
+            parent_id = comp.get('parent_id')
+            if parent_id not in parent_groups:
+                parent_groups[parent_id] = []
+            parent_groups[parent_id].append(comp)
+
+        # 각 그룹 내에서 행 기반 배치
+        for parent_id, children in parent_groups.items():
+            self._layout_items_by_row(children, parent_id)
+
+    def _layout_items_by_row(self, items: List[Dict], parent_id: str):
+        """행 기반 자동 배치 (v6.0)"""
+        # 부모 영역
+        if parent_id in self.positions:
+            parent_pos = self.positions[parent_id]
+        else:
+            parent_pos = {
+                'x': 0,
+                'y': 0,
+                'width': self.canvas_width,
+                'height': self.canvas_height
+            }
+
+        # 행번호별로 그룹화
+        row_groups = {}
+        for item in items:
+            row_num = item.get('row_number', 1)
+            if row_num not in row_groups:
+                row_groups[row_num] = []
+            row_groups[row_num].append(item)
+
+        # 각 행별로 균등 배치
+        for row_num, row_items in row_groups.items():
+            self._layout_single_row(row_items, parent_pos)
+
+    def _layout_single_row(self, items: List[Dict], parent_pos: Dict):
+        """한 행의 아이템들을 균등 배치 (v6.0)"""
+        count = len(items)
+
+        # 사용 가능한 너비 계산
+        available_width = 100 - self.LEFT_MARGIN - self.RIGHT_MARGIN
+        total_gap = self.GAP * (count - 1) if count > 1 else 0
+        item_width = (available_width - total_gap) / count if count > 0 else 0
+
+        # 각 아이템 배치
+        for i, item in enumerate(items):
+            # X% 계산
+            x_percent = self.LEFT_MARGIN + (item_width + self.GAP) * i
+
+            # Y%, 높이% 가져오기
+            y_percent = item.get('y_percent', 0)
+            height_percent = item.get('height_percent', 100)
+
+            # 픽셀 계산
+            x_px = parent_pos['x'] + (parent_pos['width'] * (x_percent / 100))
+            y_px = parent_pos['y'] + (parent_pos['height'] * (y_percent / 100))
+            width_px = parent_pos['width'] * (item_width / 100)
+            height_px = parent_pos['height'] * (height_percent / 100)
+
+            # 저장
+            item_id = item['id']
+            self.positions[item_id] = {
+                'x': x_px,
+                'y': y_px,
+                'width': width_px,
+                'height': height_px
             }
