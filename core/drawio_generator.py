@@ -1,11 +1,15 @@
 """
-AutoArchitect - Draw.io XML 생성기
+AutoArchitect - Draw.io XML Generator (v2.0 리팩토링)
+- DrawioGenerator: 기본형 (LAYERS/COMPONENTS)
+- NestedDrawioGenerator: 계층형 (LAYERS/BOXES/COMPONENTS)
 """
 
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any
 from datetime import datetime
+from abc import ABC, abstractmethod
 import uuid
+import pandas as pd
 
 from utils.constants import (
     COLOR_MAP,
@@ -15,104 +19,47 @@ from utils.constants import (
     LINE_STYLES,
     TEXT_SIZES,
     DEFAULT_CANVAS_WIDTH,
-    DEFAULT_CANVAS_HEIGHT
+    DEFAULT_CANVAS_HEIGHT,
+    LAYER_HEADER_HEIGHT,
+    BOX_HEADER_HEIGHT,
+    HEADER_TOP_MARGIN,
+    HEADER_SIDE_MARGIN,
+    get_color,
+    get_border_color,
+    get_connection_style,
+    get_line_style
 )
 
 
-class DrawioGenerator:
-    """Draw.io XML 파일 생성기"""
+class BaseDrawioGenerator(ABC):
+    """Draw.io XML 생성기 기본 클래스"""
 
     def __init__(self):
         self.cell_id_counter = 2  # 0, 1은 예약
-        self.positions = {}  # {component_id: {'x': ..., 'y': ..., 'width': ..., 'height': ...}}
+        self.positions: Dict[str, Dict] = {}
+        self.cell_map: Dict[str, str] = {}  # component_id -> cell_id 매핑
 
-    def generate_xml(self, data: Dict[str, Any], positions: Dict[str, Dict]) -> str:
-        """
-        전체 Draw.io XML 생성
-
-        Args:
-            data: parse_to_dict()로 변환된 데이터
-            positions: 레이아웃 엔진에서 계산된 위치 정보
-
-        Returns:
-            Draw.io XML 문자열
-        """
-        self.positions = positions
-        self.cell_id_counter = 2
-
-        # 캔버스 크기
-        canvas_width = data['config'].get('캔버스너비', DEFAULT_CANVAS_WIDTH)
-        canvas_height = data['config'].get('캔버스높이', DEFAULT_CANVAS_HEIGHT)
-        diagram_name = data['config'].get('다이어그램명', 'System Architecture')
-
-        # XML 루트 생성
-        root = self._create_root_structure(diagram_name, canvas_width, canvas_height)
-
-        # mxGraphModel > root 가져오기
-        graph_root = root.find('.//root')
-
-        # 레이어 생성
-        layer_cells = {}
-        for layer in data['layers']:
-            layer_cell = self._create_layer(layer, canvas_width, graph_root)
-            layer_cells[layer['id']] = layer_cell
-
-        # 컴포넌트 생성
-        component_cells = {}
-        for component in data['components']:
-            # 해당 레이어의 parent cell ID 찾기
-            parent_cell = layer_cells.get(component['layer_id'])
-            parent_id = parent_cell.get('id') if parent_cell else '1'
-
-            comp_cell = self._create_component(component, parent_id, graph_root)
-            component_cells[component['id']] = comp_cell
-
-        # 서브 컴포넌트 생성
-        if 'sub_components' in data:
-            self._create_sub_components(
-                data['sub_components'],
-                component_cells,
-                graph_root
-            )
-
-        # 연결선 생성
-        if 'connections' in data:
-            self._create_connections(
-                data['connections'],
-                component_cells,
-                graph_root
-            )
-
-        # 그룹 생성 (옵션) - 일단 비활성화 (레이아웃 문제)
-        # if 'groups' in data:
-        #     self._create_groups(
-        #         data['groups'],
-        #         component_cells,
-        #         graph_root
-        #     )
-
-        # XML을 문자열로 변환
-        xml_str = self._prettify_xml(root)
-        return xml_str
+    def _get_next_id(self) -> int:
+        """다음 Cell ID 반환"""
+        current = self.cell_id_counter
+        self.cell_id_counter += 1
+        return current
 
     def _create_root_structure(self, diagram_name: str, width: int, height: int) -> ET.Element:
         """XML 기본 구조 생성"""
-        # mxfile
         mxfile = ET.Element('mxfile', {
             'host': 'app.diagrams.net',
             'modified': datetime.now().isoformat(),
             'agent': 'AutoArchitect',
-            'version': '1.0',
+            'version': '2.0',
             'type': 'device'
         })
 
-        # diagram
         diagram = ET.SubElement(mxfile, 'diagram', {
             'name': diagram_name,
             'id': str(uuid.uuid4())
         })
 
-        # mxGraphModel
         graph_model = ET.SubElement(diagram, 'mxGraphModel', {
             'dx': '1422',
             'dy': '794',
@@ -131,31 +78,124 @@ class DrawioGenerator:
             'shadow': '0'
         })
 
-        # root
         root = ET.SubElement(graph_model, 'root')
-
-        # 기본 cell 2개 (필수)
         ET.SubElement(root, 'mxCell', {'id': '0'})
         ET.SubElement(root, 'mxCell', {'id': '1', 'parent': '0'})
 
         return mxfile
 
+    def _create_connections(self, connections: List[Dict], parent: ET.Element):
+        """연결선 생성"""
+        for conn in connections:
+            from_cell_id = self.cell_map.get(conn.get('from_id'))
+            to_cell_id = self.cell_map.get(conn.get('to_id'))
+
+            if not from_cell_id or not to_cell_id:
+                continue
+
+            cell_id = str(self._get_next_id())
+
+            # 연결 타입 스타일
+            conn_type = conn.get('type', '데이터흐름')
+            conn_style = get_connection_style(conn_type)
+            style = conn_style['style']
+
+            # 선 스타일 추가
+            line_style = get_line_style(conn.get('style', '실선'))
+            if line_style:
+                style += line_style
+
+            # 화살표 설정
+            style += f"endArrow={conn_style['arrow']};"
+            if conn_style['start_arrow'] != 'none':
+                style += f"startArrow={conn_style['start_arrow']};"
+
+            # 라벨
+            label = conn.get('label', '')
+            if pd.isna(label):
+                label = ''
+
+            cell = ET.SubElement(parent, 'mxCell', {
+                'id': cell_id,
+                'value': str(label),
+                'style': style,
+                'parent': '1',
+                'edge': '1',
+                'source': from_cell_id,
+                'target': to_cell_id
+            })
+
+            ET.SubElement(cell, 'mxGeometry', {
+                'relative': '1',
+                'as': 'geometry'
+            })
+
+    def _prettify_xml(self, element: ET.Element) -> str:
+        """XML을 보기 좋게 포맷팅"""
+        from xml.dom import minidom
+        rough_string = ET.tostring(element, encoding='unicode')
+        reparsed = minidom.parseString(rough_string)
+        return reparsed.toprettyxml(indent="  ")
+
+    @abstractmethod
+    def generate_xml(self, data: Dict[str, Any], positions: Dict[str, Dict]) -> str:
+        """XML 생성 (서브클래스에서 구현)"""
+        pass
+
+
+class DrawioGenerator(BaseDrawioGenerator):
+    """기본형 Draw.io XML 생성기"""
+
+    def generate_xml(self, data: Dict[str, Any], positions: Dict[str, Dict]) -> str:
+        """전체 Draw.io XML 생성"""
+        self.positions = positions
+        self.cell_id_counter = 2
+        self.cell_map = {}
+
+        # 캔버스 크기
+        canvas_width = data.get('config', {}).get('캔버스너비', DEFAULT_CANVAS_WIDTH)
+        canvas_height = data.get('config', {}).get('캔버스높이', DEFAULT_CANVAS_HEIGHT)
+        diagram_name = data.get('config', {}).get('다이어그램명', 'System Architecture')
+
+        # XML 루트 생성
+        root = self._create_root_structure(diagram_name, canvas_width, canvas_height)
+        graph_root = root.find('.//root')
+
+        # 레이어 생성
+        layer_cells = {}
+        for layer in data.get('layers', []):
+            layer_cell = self._create_layer(layer, canvas_width, graph_root)
+            layer_cells[layer['id']] = layer_cell
+
+        # 컴포넌트 생성
+        for component in data.get('components', []):
+            parent_cell = layer_cells.get(component.get('layer_id'))
+            parent_id = parent_cell.get('id') if parent_cell else '1'
+            self._create_component(component, parent_id, graph_root)
+
+        # 서브 컴포넌트 생성
+        if data.get('sub_components'):
+            self._create_sub_components(data['sub_components'], graph_root)
+
+        # 연결선 생성
+        if data.get('connections'):
+            self._create_connections(data['connections'], graph_root)
+
+        return self._prettify_xml(root)
+
     def _create_layer(self, layer: Dict, canvas_width: int, parent: ET.Element) -> Dict:
-        """레이어를 일반 박스로 생성 (Swimlane 대신)"""
+        """레이어 생성"""
         cell_id = str(self._get_next_id())
 
-        # 위치 정보 가져오기
-        layer_pos = self.positions.get(layer['id'], {})
-        x = layer_pos.get('x', 0)
-        y = layer_pos.get('y', 0)
-        width = layer_pos.get('width', canvas_width)
-        height = layer_pos.get('height', 200)
+        pos = self.positions.get(layer['id'], {})
+        x = pos.get('x', 0)
+        y = pos.get('y', 0)
+        width = pos.get('width', canvas_width)
+        height = pos.get('height', 200)
 
-        # 배경색, 테두리색
-        bg_color = COLOR_MAP.get(layer['bg_color'], '#FFFFFF')
-        border_color = BORDER_COLOR_MAP.get(layer['border_color'], '#000000')
+        bg_color = get_color(layer.get('bg_color', '흰색'))
+        border_color = get_border_color(layer.get('border_color', '검정'))
 
-        # 일반 박스 스타일 (Swimlane 대신)
         style = (
             f"rounded=0;whiteSpace=wrap;html=1;"
             f"fillColor={bg_color};strokeColor={border_color};"
@@ -163,16 +203,14 @@ class DrawioGenerator:
             f"spacingTop=10;"
         )
 
-        # mxCell 생성
         cell = ET.SubElement(parent, 'mxCell', {
             'id': cell_id,
-            'value': layer['name'],
+            'value': layer.get('name', ''),
             'style': style,
             'parent': '1',
             'vertex': '1'
         })
 
-        # geometry
         ET.SubElement(cell, 'mxGeometry', {
             'x': str(int(x)),
             'y': str(int(y)),
@@ -181,42 +219,37 @@ class DrawioGenerator:
             'as': 'geometry'
         })
 
+        self.cell_map[layer['id']] = cell_id
         return {'id': cell_id, 'layer_data': layer}
 
-    def _create_component(self, component: Dict, parent_id: str, parent: ET.Element) -> Dict:
-        """컴포넌트 생성 - 레이어의 자식으로"""
+    def _create_component(self, component: Dict, parent_id: str, parent: ET.Element):
+        """컴포넌트 생성"""
         cell_id = str(self._get_next_id())
 
-        # 위치 정보
-        comp_pos = self.positions.get(component['id'], {})
-        x = comp_pos.get('x', 100)
-        y = comp_pos.get('y', 50)
-        width = comp_pos.get('width', 180)
-        height = comp_pos.get('height', 80)
+        pos = self.positions.get(component['id'], {})
+        x = pos.get('x', 100)
+        y = pos.get('y', 50)
+        width = pos.get('width', 180)
+        height = pos.get('height', 80)
 
         # 컴포넌트 타입별 스타일
-        comp_style_template = COMPONENT_STYLES.get(component['type'], COMPONENT_STYLES['단일박스'])
+        comp_type = component.get('type', '단일박스')
+        comp_style_data = COMPONENT_STYLES.get(comp_type, COMPONENT_STYLES['단일박스'])
+        style = comp_style_data['style']
 
-        # 스타일 문자열 생성
-        style = comp_style_template['style']
-
-        # 배경색 설정 (흰색 배경)
+        # 색상 설정
         style = style.replace('{fill}', '#FFFFFF')
         style = style.replace('{stroke}', '#666666')
-
-        # 텍스트 설정
         style += 'fontSize=11;fontStyle=1;align=center;verticalAlign=middle;'
 
-        # mxCell 생성 - parent를 '1'로 (레이어 위에 배치)
         cell = ET.SubElement(parent, 'mxCell', {
             'id': cell_id,
-            'value': component['name'],
+            'value': component.get('name', ''),
             'style': style,
-            'parent': '1',  # 레이어가 아닌 루트에 배치
+            'parent': '1',
             'vertex': '1'
         })
 
-        # geometry - 절대 좌표 사용
         ET.SubElement(cell, 'mxGeometry', {
             'x': str(int(x)),
             'y': str(int(y)),
@@ -225,33 +258,26 @@ class DrawioGenerator:
             'as': 'geometry'
         })
 
-        return {'id': cell_id, 'component_data': component}
+        self.cell_map[component['id']] = cell_id
 
-    def _create_sub_components(self, sub_components: List[Dict],
-                               component_cells: Dict, parent: ET.Element):
-        """서브 컴포넌트 생성 - 부모 컴포넌트 내부에 배치"""
+    def _create_sub_components(self, sub_components: List[Dict], parent: ET.Element):
+        """서브 컴포넌트 생성"""
         # 부모별로 그룹화
-        by_parent = {}
+        by_parent: Dict[str, List[Dict]] = {}
         for sub in sub_components:
-            parent_id = sub['parent_id']
+            parent_id = sub.get('parent_id')
             if parent_id not in by_parent:
                 by_parent[parent_id] = []
             by_parent[parent_id].append(sub)
 
-        # 각 부모별로 서브 컴포넌트 배치
         for parent_id, subs in by_parent.items():
-            parent_cell = component_cells.get(parent_id)
-            if not parent_cell:
+            parent_cell_id = self.cell_map.get(parent_id)
+            if not parent_cell_id:
                 continue
 
-            parent_cell_id = parent_cell['id']
-
-            # 부모 컴포넌트의 위치 정보
             parent_pos = self.positions.get(parent_id, {})
             parent_width = parent_pos.get('width', 180)
             parent_height = parent_pos.get('height', 80)
-
-            num_subs = len(subs)
 
             # 서브 컴포넌트 크기
             sub_width = 65
@@ -259,46 +285,38 @@ class DrawioGenerator:
             gap_x = 8
             gap_y = 8
 
-            # 한 줄에 몇 개씩 배치할지 계산
+            num_subs = len(subs)
             max_cols = int((parent_width - 20) / (sub_width + gap_x))
             cols = min(max_cols, num_subs) if max_cols > 0 else 1
             rows = (num_subs + cols - 1) // cols
 
-            # 전체 그리드 크기
             grid_width = cols * sub_width + (cols - 1) * gap_x
-            grid_height = rows * sub_height + (rows - 1) * gap_y
-
-            # 시작 위치 (중앙 정렬, 위쪽 여백)
             start_x = (parent_width - grid_width) / 2
-            start_y = 25  # 타이틀 공간
+            start_y = 25
 
-            for idx, sub in enumerate(sorted(subs, key=lambda s: s['order'])):
+            for idx, sub in enumerate(sorted(subs, key=lambda s: s.get('order', 0))):
                 row = idx // cols
                 col = idx % cols
 
                 cell_id = str(self._get_next_id())
 
-                # 상대 위치 계산
                 rel_x = start_x + col * (sub_width + gap_x)
                 rel_y = start_y + row * (sub_height + gap_y)
 
-                # 스타일 - 더 작은 폰트
                 style = (
                     'rounded=0;whiteSpace=wrap;html=1;'
                     'fillColor=#E8F5E9;strokeColor=#4CAF50;'
                     'fontSize=10;fontStyle=0;'
                 )
 
-                # mxCell 생성
                 cell = ET.SubElement(parent, 'mxCell', {
                     'id': cell_id,
-                    'value': sub['name'],
+                    'value': sub.get('name', ''),
                     'style': style,
                     'parent': parent_cell_id,
                     'vertex': '1'
                 })
 
-                # geometry - 부모 기준 상대 좌표
                 ET.SubElement(cell, 'mxGeometry', {
                     'x': str(int(rel_x)),
                     'y': str(int(rel_y)),
@@ -307,111 +325,271 @@ class DrawioGenerator:
                     'as': 'geometry'
                 })
 
-    def _create_connections(self, connections: List[Dict],
-                            component_cells: Dict, parent: ET.Element):
-        """연결선 생성"""
-        for conn in connections:
-            from_cell = component_cells.get(conn['from_id'])
-            to_cell = component_cells.get(conn['to_id'])
 
-            if not from_cell or not to_cell:
-                continue
+class NestedDrawioGenerator(BaseDrawioGenerator):
+    """계층형 Draw.io XML 생성기 (헤더 영역 확보)"""
 
-            cell_id = str(self._get_next_id())
+    def __init__(self):
+        super().__init__()
+        self.box_children: Dict[str, int] = {}
 
-            # 연결 타입별 스타일
-            conn_style_data = CONNECTION_STYLES.get(conn['type'], CONNECTION_STYLES['데이터흐름'])
-            style = conn_style_data['style']
+    def generate_xml(self, data: Dict[str, Any], positions: Dict[str, Dict]) -> str:
+        """전체 XML 생성"""
+        self.positions = positions
+        self.cell_id_counter = 2
+        self.cell_map = {}
 
-            # 선 스타일 추가
-            line_style = LINE_STYLES.get(conn.get('style', '실선'), '')
-            if line_style:
-                style += line_style
+        # 자식 요소 개수 계산
+        self._calculate_children_count(data)
 
-            # 화살표 설정
-            style += f"endArrow={conn_style_data['arrow']};"
-            if conn_style_data['start_arrow'] != 'none':
-                style += f"startArrow={conn_style_data['start_arrow']};"
+        # 캔버스 크기
+        canvas_width = data.get('config', {}).get('캔버스너비', DEFAULT_CANVAS_WIDTH)
+        canvas_height = data.get('config', {}).get('캔버스높이', DEFAULT_CANVAS_HEIGHT)
+        diagram_name = data.get('config', {}).get('다이어그램명', 'System Architecture')
 
-            # mxCell 생성
-            cell = ET.SubElement(parent, 'mxCell', {
-                'id': cell_id,
-                'value': conn.get('label', ''),
-                'style': style,
-                'parent': '1',
-                'edge': '1',
-                'source': from_cell['id'],
-                'target': to_cell['id']
-            })
+        # XML 루트 생성
+        root = self._create_root_structure(diagram_name, canvas_width, canvas_height)
+        graph_root = root.find('.//root')
 
-            # geometry
-            ET.SubElement(cell, 'mxGeometry', {
-                'relative': '1',
-                'as': 'geometry'
-            })
+        # 레이어 생성 (헤더 분리)
+        for layer in data.get('layers', []):
+            self._create_layer_with_header(layer, graph_root)
 
-    def _create_groups(self, groups: List[Dict],
-                       component_cells: Dict, parent: ET.Element):
-        """그룹 영역 생성 (점선 테두리)"""
-        for group in groups:
-            # 포함된 컴포넌트들의 위치로 경계 박스 계산
-            comp_positions = []
-            for comp_id in group['component_ids']:
-                if comp_id in self.positions:
-                    comp_positions.append(self.positions[comp_id])
+        # 박스 생성 (헤더 분리)
+        for box in data.get('boxes', []):
+            self._create_box_with_header(box, graph_root)
 
-            if not comp_positions:
-                continue
+        # 컴포넌트 생성
+        for comp in data.get('components', []):
+            self._create_component(comp, graph_root)
 
-            # 경계 박스 계산
-            min_x = min(pos['x'] for pos in comp_positions) - 20
-            min_y = min(pos['y'] for pos in comp_positions) - 40
-            max_x = max(pos['x'] + pos['width'] for pos in comp_positions) + 20
-            max_y = max(pos['y'] + pos['height'] for pos in comp_positions) + 20
+        # 연결선 생성
+        if data.get('connections'):
+            self._create_connections(data['connections'], graph_root)
 
-            width = max_x - min_x
-            height = max_y - min_y
+        return self._prettify_xml(root)
 
-            cell_id = str(self._get_next_id())
+    def _calculate_children_count(self, data: Dict[str, Any]):
+        """각 요소의 자식 개수 계산"""
+        self.box_children = {}
 
-            # 그룹 스타일 (반투명 배경, 점선 테두리)
-            opacity = group.get('bg_opacity', '5%').replace('%', '')
+        for box in data.get('boxes', []):
+            parent_id = box.get('parent_id')
+            if parent_id:
+                self.box_children[parent_id] = self.box_children.get(parent_id, 0) + 1
+
+        for comp in data.get('components', []):
+            parent_id = comp.get('parent_id')
+            if parent_id:
+                self.box_children[parent_id] = self.box_children.get(parent_id, 0) + 1
+
+    def _has_children(self, item_id: str) -> bool:
+        """자식 요소가 있는지 확인"""
+        return self.box_children.get(item_id, 0) > 0
+
+    def _create_layer_with_header(self, layer: Dict, parent: ET.Element):
+        """레이어 생성 (배경 + 헤더 텍스트 분리)"""
+        cell_id = str(self._get_next_id())
+        self.cell_map[layer['id']] = cell_id
+
+        pos = self.positions.get(layer['id'], {})
+        x = pos.get('x', 0)
+        y = pos.get('y', 0)
+        width = pos.get('width', 1200)
+        height = pos.get('height', 200)
+
+        bg_color = get_color(layer.get('bg_color', '흰색'))
+        layer_name = layer.get('name', '')
+
+        # 배경 셀 (텍스트 없음)
+        style = f"rounded=0;whiteSpace=wrap;html=1;fillColor={bg_color};strokeColor=none;"
+
+        cell = ET.SubElement(parent, 'mxCell', {
+            'id': cell_id,
+            'value': '',
+            'style': style,
+            'parent': '1',
+            'vertex': '1'
+        })
+
+        ET.SubElement(cell, 'mxGeometry', {
+            'x': str(int(x)),
+            'y': str(int(y)),
+            'width': str(int(width)),
+            'height': str(int(height)),
+            'as': 'geometry'
+        })
+
+        # 헤더 텍스트 셀
+        header_cell_id = str(self._get_next_id())
+        header_x = x + (width / 2) - 150
+        header_y = y + HEADER_TOP_MARGIN
+        header_width = 300
+        header_height = LAYER_HEADER_HEIGHT
+
+        header_style = (
+            f"text;html=1;strokeColor=none;fillColor=none;"
+            f"align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;"
+            f"fontSize=12;fontStyle=1;"
+        )
+
+        header_cell = ET.SubElement(parent, 'mxCell', {
+            'id': header_cell_id,
+            'value': str(layer_name),
+            'style': header_style,
+            'parent': '1',
+            'vertex': '1'
+        })
+
+        ET.SubElement(header_cell, 'mxGeometry', {
+            'x': str(int(header_x)),
+            'y': str(int(header_y)),
+            'width': str(int(header_width)),
+            'height': str(int(header_height)),
+            'as': 'geometry'
+        })
+
+    def _create_box_with_header(self, box: Dict, parent: ET.Element):
+        """박스 생성 (배경 + 헤더 텍스트 분리)"""
+        box_id = box['id']
+        has_children = self._has_children(box_id)
+
+        pos = self.positions.get(box_id, {})
+        box_x = pos.get('x', 0)
+        box_y = pos.get('y', 0)
+        box_width = pos.get('width', 200)
+        box_height = pos.get('height', 100)
+
+        bg_color = get_color(box.get('bg_color', '연회색'))
+        border_color = get_border_color(box.get('border_color', '회색'))
+        font_size = box.get('font_size', 11)
+        if pd.isna(font_size):
+            font_size = 11
+
+        box_name = box.get('name', '')
+        if pd.isna(box_name):
+            box_name = ''
+
+        cell_id = str(self._get_next_id())
+        self.cell_map[box_id] = cell_id
+
+        # 배경 셀
+        style = f"rounded=0;whiteSpace=wrap;html=1;fillColor={bg_color};strokeColor={border_color};"
+
+        cell = ET.SubElement(parent, 'mxCell', {
+            'id': cell_id,
+            'value': '',
+            'style': style,
+            'parent': '1',
+            'vertex': '1'
+        })
+
+        ET.SubElement(cell, 'mxGeometry', {
+            'x': str(int(box_x)),
+            'y': str(int(box_y)),
+            'width': str(int(box_width)),
+            'height': str(int(box_height)),
+            'as': 'geometry'
+        })
+
+        # 헤더/텍스트 셀
+        header_cell_id = str(self._get_next_id())
+
+        if has_children:
+            # 자식이 있으면 상단 헤더 영역에 텍스트
+            header_x = box_x + HEADER_SIDE_MARGIN
+            header_y = box_y + HEADER_TOP_MARGIN
+            header_width = box_width - (HEADER_SIDE_MARGIN * 2)
+            header_height = BOX_HEADER_HEIGHT
+        else:
+            # 자식이 없으면 중앙에 텍스트
+            header_x = box_x
+            header_y = box_y
+            header_width = box_width
+            header_height = box_height
+
+        header_style = (
+            f"text;html=1;strokeColor=none;fillColor=none;"
+            f"align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;"
+            f"fontSize={int(font_size)};fontStyle=1;"
+        )
+
+        header_cell = ET.SubElement(parent, 'mxCell', {
+            'id': header_cell_id,
+            'value': str(box_name),
+            'style': header_style,
+            'parent': '1',
+            'vertex': '1'
+        })
+
+        ET.SubElement(header_cell, 'mxGeometry', {
+            'x': str(int(header_x)),
+            'y': str(int(header_y)),
+            'width': str(int(header_width)),
+            'height': str(int(header_height)),
+            'as': 'geometry'
+        })
+
+    def _create_component(self, comp: Dict, parent: ET.Element):
+        """컴포넌트 생성"""
+        cell_id = str(self._get_next_id())
+        self.cell_map[comp['id']] = cell_id
+
+        pos = self.positions.get(comp['id'], {})
+        x = pos.get('x', 0)
+        y = pos.get('y', 0)
+        width = pos.get('width', 100)
+        height = pos.get('height', 60)
+
+        font_size = comp.get('font_size', 10)
+        if pd.isna(font_size):
+            font_size = 10
+
+        comp_type = comp.get('type', '단일박스')
+
+        # 타입별 스타일
+        if comp_type == '데이터베이스':
             style = (
-                f"rounded=0;whiteSpace=wrap;html=1;dashed=1;dashPattern=5 5;"
-                f"fillColor=#FFFFFF;fillOpacity={opacity};strokeColor=#FF0000;"
-                f"fontStyle=1;fontSize=11;"
+                f"shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;"
+                f"fillColor=#FFFFFF;strokeColor=#666666;"
+                f"fontSize={int(font_size)};fontStyle=0;align=center;verticalAlign=middle;"
+            )
+        elif comp_type == '서비스':
+            style = (
+                f"rounded=1;whiteSpace=wrap;html=1;arcSize=10;"
+                f"fillColor=#FFFFFF;strokeColor=#666666;"
+                f"fontSize={int(font_size)};fontStyle=0;align=center;verticalAlign=middle;"
+            )
+        else:
+            style = (
+                f"rounded=0;whiteSpace=wrap;html=1;"
+                f"fillColor=#FFFFFF;strokeColor=#666666;"
+                f"fontSize={int(font_size)};fontStyle=0;align=center;verticalAlign=middle;"
             )
 
-            # mxCell 생성
-            cell = ET.SubElement(parent, 'mxCell', {
-                'id': cell_id,
-                'value': group['name'],
-                'style': style,
-                'parent': '1',
-                'vertex': '1'
-            })
+        comp_name = comp.get('name', '')
+        if pd.isna(comp_name):
+            comp_name = ''
 
-            # geometry
-            ET.SubElement(cell, 'mxGeometry', {
-                'x': str(int(min_x)),
-                'y': str(int(min_y)),
-                'width': str(int(width)),
-                'height': str(int(height)),
-                'as': 'geometry'
-            })
+        cell = ET.SubElement(parent, 'mxCell', {
+            'id': cell_id,
+            'value': str(comp_name),
+            'style': style,
+            'parent': '1',
+            'vertex': '1'
+        })
 
-    def _get_next_id(self) -> int:
-        """다음 Cell ID 반환"""
-        current = self.cell_id_counter
-        self.cell_id_counter += 1
-        return current
+        ET.SubElement(cell, 'mxGeometry', {
+            'x': str(int(x)),
+            'y': str(int(y)),
+            'width': str(int(width)),
+            'height': str(int(height)),
+            'as': 'geometry'
+        })
 
-    def _prettify_xml(self, element: ET.Element) -> str:
-        """XML을 보기 좋게 포맷팅"""
-        from xml.dom import minidom
 
-        rough_string = ET.tostring(element, encoding='unicode')
-        reparsed = minidom.parseString(rough_string)
-
-        # 선언문 포함하여 반환
-        return reparsed.toprettyxml(indent="  ")
+def create_drawio_generator(is_nested: bool = False) -> BaseDrawioGenerator:
+    """적절한 Draw.io 생성기 반환"""
+    if is_nested:
+        return NestedDrawioGenerator()
+    return DrawioGenerator()

@@ -1,3 +1,5 @@
+# AutoArchitect v2.0 Dependencies
+
 # 웹 프레임워크
 streamlit==1.29.0
 
@@ -5,9 +7,6 @@ streamlit==1.29.0
 pandas==2.1.4
 openpyxl==3.1.2
 numpy==1.26.2
-
-# XML 처리 (기본 라이브러리 사용하므로 별도 설치 불필요)
-# xml.etree.ElementTree는 Python 내장
 
 # 유틸리티
 python-dateutil==2.8.2

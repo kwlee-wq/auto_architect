@@ -2,7 +2,7 @@
 AutoArchitect - 검증 헬퍼 함수
 """
 
-from typing import List, Set, Any
+from typing import List, Set, Any, Tuple
 import pandas as pd
 
 
@@ -147,7 +147,7 @@ def sanitize_string(value: Any, max_length: int = None) -> str:
 
 def validate_percentage_sum(values: List[float],
                             target: float = 100.0,
-                            tolerance: float = 5.0) -> tuple:
+                            tolerance: float = 5.0) -> Tuple[bool, float]:
     """
     퍼센트 값들의 합계가 목표에 가까운지 검사
 
@@ -183,3 +183,46 @@ def format_error_location(sheet_name: str, row_num: int, column_name: str = None
         location += f" {column_name} 컬럼"
 
     return location
+
+
+def validate_id_format(id_value: str, prefix: str = None) -> bool:
+    """
+    ID 형식 검증
+
+    Args:
+        id_value: 검사할 ID
+        prefix: 예상되는 접두사 (예: 'L', 'C', 'B')
+
+    Returns:
+        유효하면 True
+    """
+    if pd.isna(id_value) or not id_value:
+        return False
+    
+    id_str = str(id_value).strip()
+    
+    if not id_str:
+        return False
+    
+    if prefix and not id_str.startswith(prefix):
+        return False
+    
+    return True
+
+
+def get_safe_value(row: dict, key: str, default: Any = None) -> Any:
+    """
+    딕셔너리에서 안전하게 값을 가져옴 (NaN 처리)
+
+    Args:
+        row: 딕셔너리
+        key: 키
+        default: 기본값
+
+    Returns:
+        값 또는 기본값
+    """
+    value = row.get(key, default)
+    if pd.isna(value):
+        return default
+    return value
