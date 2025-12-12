@@ -1,6 +1,7 @@
 """
 AutoArchitect - 시스템 구성도 자동 생성 도구
 Streamlit 메인 애플리케이션
+v6.0 완전 호환 버전
 """
 
 import streamlit as st
@@ -8,12 +9,7 @@ import streamlit.components.v1 as components
 import urllib.parse
 from pathlib import Path
 
-# TODO: 모듈 import (개발 후 활성화)
-# from core.excel_parser import ExcelParser
-# from core.layout_engine import LayoutEngine
-# from core.drawio_generator import DrawioGenerator
-
-import pandas as pd  # 추가
+import pandas as pd
 
 
 def init_session_state():
@@ -44,7 +40,7 @@ def embed_drawio_editor(xml_content: str, diagram_name: str):
                 file_name=f"{diagram_name}.drawio",
                 mime="application/xml",
                 help="Draw.io에서 열 수 있는 파일",
-                key="main_drawio_download"  # 고유 키 추가
+                key="main_drawio_download"
             )
             st.caption("👆 이 파일을 다운로드하세요")
 
@@ -210,7 +206,7 @@ def render_sidebar():
 
         st.markdown("---")
         st.markdown("### ℹ️ 정보")
-        st.markdown("**Version:** 0.1.0-dev")
+        st.markdown("**Version:** 6.0.0")
         st.markdown("**Python:** 3.11")
 
 
@@ -266,8 +262,11 @@ def main():
                 parser = ExcelParser()
                 st.info("🔶 기본(Flat) 구조 감지")
 
+            # 파일 포인터 리셋 후 읽기
+            uploaded_file.seek(0)
             sheets = parser.read_excel(uploaded_file)
             validation_result = parser.validate_data(sheets)
+
         # 검증 결과 표시
         if validation_result['is_valid']:
             st.success("✅ 검증 완료! 데이터가 정상입니다.")
@@ -278,24 +277,33 @@ def main():
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
-                st.metric("레이어", f"{len(data['layers'])}개")
+                st.metric("레이어", f"{len(data.get('layers', []))}개")
             with col2:
-                st.metric("컴포넌트", f"{len(data['components'])}개")
+                # 계층형이면 boxes, 기본형이면 components
+                if is_nested:
+                    st.metric("박스", f"{len(data.get('boxes', []))}개")
+                else:
+                    st.metric("컴포넌트", f"{len(data.get('components', []))}개")
             with col3:
-                st.metric("연결", f"{len(data['connections'])}개")
+                st.metric("연결", f"{len(data.get('connections', []))}개")
             with col4:
-                st.metric("그룹", f"{len(data.get('groups', []))}개")
+                if is_nested:
+                    st.metric("컴포넌트", f"{len(data.get('components', []))}개")
+                else:
+                    st.metric("그룹", f"{len(data.get('groups', []))}개")
 
             # 경고 메시지
-            if validation_result['warnings']:
+            warnings = validation_result.get('warnings', [])
+            if warnings:
                 with st.expander("⚠️ 경고 메시지 (생성은 가능)", expanded=False):
-                    for warning in validation_result['warnings']:
+                    for warning in warnings:
                         st.warning(warning)
 
-            # 정보 메시지
-            if validation_result['infos']:
+            # 정보 메시지 (infos 키가 없어도 에러 안남)
+            infos = validation_result.get('infos', [])
+            if infos:
                 with st.expander("ℹ️ 정보", expanded=False):
-                    for info in validation_result['infos']:
+                    for info in infos:
                         st.info(info)
 
             # Step 3: 구조 미리보기
@@ -305,22 +313,26 @@ def main():
                 # 계층형 미리보기
                 st.markdown("**📦 박스 구조:**")
                 for box in data.get('boxes', []):
-                    indent = "  " * (box['parent_id'].count('_') if '_' in box['parent_id'] else 0)
-                    st.text(f"{indent}└─ {box['name']} ({box['width_percent']}% × {box['height_percent']}%)")
+                    # v6.0 호환: width_percent가 없을 수 있음
+                    if 'width_percent' in box:
+                        st.text(f"└─ {box['name']} ({box['width_percent']}% × {box['height_percent']}%)")
+                    else:
+                        row_num = box.get('row_number', '?')
+                        st.text(f"└─ {box['name']} (행{row_num}, 높이{box['height_percent']}%)")
 
                 st.markdown(f"**🔧 컴포넌트:** {len(data.get('components', []))}개")
             else:
                 # 기존 레이어별 미리보기
-                for layer in data['layers']:
+                for layer in data.get('layers', []):
                     st.subheader(f"📦 {layer['name']} (높이: {layer['height_percent']}%)")
-                    components = [c for c in data['components']
-                                  if c['layer_id'] == layer['id']]
+                    components = [c for c in data.get('components', [])
+                                  if c.get('layer_id') == layer['id']]
 
                     if components:
                         comp_info = []
                         for c in components:
                             sub_count = len([s for s in data.get('sub_components', [])
-                                             if s['parent_id'] == c['id']])
+                                             if s.get('parent_id') == c['id']])
                             if sub_count > 0:
                                 comp_info.append(f"{c['name']} ({sub_count}개 서브)")
                             else:
@@ -351,7 +363,7 @@ def main():
                     )
 
                 with col2:
-                    default_margin = data['config'].get('여백비율', 15)
+                    default_margin = data.get('config', {}).get('여백비율', 15)
                     margin = st.slider(
                         "여백 비율 (%)",
                         min_value=5,
@@ -376,7 +388,7 @@ def main():
                         xml_content = generator.generate_xml(data, positions)
                         st.session_state['xml_content'] = xml_content
                         st.session_state['xml_generated'] = True
-                        st.session_state['diagram_name'] = data['config'].get('다이어그램명', 'diagram')
+                        st.session_state['diagram_name'] = data.get('config', {}).get('다이어그램명', 'diagram')
                 else:
                     # 기존 방식
                     from core.layout_engine import LayoutEngine
@@ -399,7 +411,7 @@ def main():
                         xml_content = generator.generate_xml(data, positions)
                         st.session_state['xml_content'] = xml_content
                         st.session_state['xml_generated'] = True
-                        st.session_state['diagram_name'] = data['config'].get('다이어그램명', 'diagram')
+                        st.session_state['diagram_name'] = data.get('config', {}).get('다이어그램명', 'diagram')
 
                 st.success("✅ 생성 완료!")
 
@@ -415,7 +427,7 @@ def main():
             # 오류 표시
             st.error("❌ 데이터 검증 실패")
 
-            for error in validation_result['errors']:
+            for error in validation_result.get('errors', []):
                 st.error(f"🔴 {error}")
 
             st.info("엑셀 파일을 수정 후 다시 업로드해주세요")

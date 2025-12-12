@@ -1,64 +1,52 @@
 """
-AutoArchitect - 통합 Layout Engine
-v5.0 (X%, 너비% 기반) + v6.0 (행번호 기반) 모두 지원
+AutoArchitect - Layout Engine
+행번호 기반 레이아웃 계산
 """
 
 from typing import Dict, List, Any
 import pandas as pd
 
 
-class UnifiedLayoutEngine:
-    """v5.0과 v6.0 레이아웃 모두 지원하는 통합 엔진"""
+class NestedLayoutEngine:
+    """행번호 기반 레이아웃 엔진"""
 
-    def __init__(self, canvas_width: int, canvas_height: int, excel_version: str = 'v5'):
-        self.canvas_width = canvas_width
-        self.canvas_height = canvas_height
-        self.excel_version = excel_version
+    def __init__(self):
+        self.canvas_width = 1400
+        self.canvas_height = 900
         self.positions = {}
 
-        # v6.0 레이아웃 설정
+        # 레이아웃 설정
         self.LEFT_MARGIN = 5
         self.RIGHT_MARGIN = 5
         self.GAP = 2
 
-    def calculate_all_positions(self, data: Dict[str, Any]) -> Dict[str, Dict]:
-        """모든 요소의 위치 계산 (버전 자동 감지)"""
+    def calculate_positions(self, data: Dict[str, Any], pattern: str = None) -> Dict[str, Dict]:
+        """모든 요소의 위치 계산"""
         self.positions = {}
 
-        # 버전 자동 감지 (data에서)
-        if 'boxes' in data and len(data['boxes']) > 0:
-            first_box = data['boxes'][0]
-            if 'row_number' in first_box:
-                self.excel_version = 'v6'
-            else:
-                self.excel_version = 'v5'
-
-        print(f"🔧 Layout Engine: {self.excel_version} 모드")
+        # 캔버스 크기
+        if 'config' in data:
+            self.canvas_width = data['config'].get('캔버스너비', self.canvas_width)
+            self.canvas_height = data['config'].get('캔버스높이', self.canvas_height)
 
         # 1. 레이어 위치 계산
-        self._calculate_layer_positions(data['layers'])
+        self._calculate_layer_positions(data.get('layers', []))
 
-        # 2. 박스 위치 계산 (버전별)
-        if self.excel_version == 'v6':
-            self._calculate_boxes_v6(data['boxes'])
-        else:
-            self._calculate_boxes_v5(data['boxes'])
+        # 2. 박스 위치 계산
+        self._calculate_box_positions(data.get('boxes', []))
 
-        # 3. 컴포넌트 위치 계산 (버전별)
-        if self.excel_version == 'v6':
-            self._calculate_components_v6(data['components'])
-        else:
-            self._calculate_components_v5(data['components'])
+        # 3. 컴포넌트 위치 계산
+        self._calculate_component_positions(data.get('components', []))
 
         return self.positions
 
     def _calculate_layer_positions(self, layers: List[Dict]):
-        """레이어 위치 계산 (공통)"""
+        """레이어 위치 계산"""
         current_y = 0
 
         for layer in layers:
             layer_id = layer['id']
-            height_percent = layer['height_percent']
+            height_percent = layer.get('height_percent', 100 / max(len(layers), 1))
 
             height_px = self.canvas_height * (height_percent / 100)
 
@@ -71,65 +59,8 @@ class UnifiedLayoutEngine:
 
             current_y += height_px
 
-    # ==================== v5.0 방식 ====================
-
-    def _calculate_boxes_v5(self, boxes: List[Dict]):
-        """v5.0: X%, 너비% 직접 사용"""
-        for box in boxes:
-            parent_id = box.get('parent_id')
-
-            # 부모 영역
-            if parent_id and parent_id in self.positions:
-                parent_pos = self.positions[parent_id]
-            else:
-                parent_pos = {
-                    'x': 0,
-                    'y': 0,
-                    'width': self.canvas_width,
-                    'height': self.canvas_height
-                }
-
-            # 절대 위치 계산
-            x_px = parent_pos['x'] + (parent_pos['width'] * (box['x_percent'] / 100))
-            y_px = parent_pos['y'] + (parent_pos['height'] * (box['y_percent'] / 100))
-            width_px = parent_pos['width'] * (box['width_percent'] / 100)
-            height_px = parent_pos['height'] * (box['height_percent'] / 100)
-
-            self.positions[box['id']] = {
-                'x': x_px,
-                'y': y_px,
-                'width': width_px,
-                'height': height_px
-            }
-
-    def _calculate_components_v5(self, components: List[Dict]):
-        """v5.0: X%, 너비% 직접 사용"""
-        for comp in components:
-            parent_id = comp.get('parent_id')
-
-            # 부모 영역
-            if parent_id and parent_id in self.positions:
-                parent_pos = self.positions[parent_id]
-            else:
-                continue
-
-            # 절대 위치 계산
-            x_px = parent_pos['x'] + (parent_pos['width'] * (comp['x_percent'] / 100))
-            y_px = parent_pos['y'] + (parent_pos['height'] * (comp['y_percent'] / 100))
-            width_px = parent_pos['width'] * (comp['width_percent'] / 100)
-            height_px = parent_pos['height'] * (comp['height_percent'] / 100)
-
-            self.positions[comp['id']] = {
-                'x': x_px,
-                'y': y_px,
-                'width': width_px,
-                'height': height_px
-            }
-
-    # ==================== v6.0 방식 ====================
-
-    def _calculate_boxes_v6(self, boxes: List[Dict]):
-        """v6.0: 행 기반 자동 배치"""
+    def _calculate_box_positions(self, boxes: List[Dict]):
+        """박스 위치 계산 - 행번호 기반"""
         # 부모별로 그룹화
         parent_groups = {}
         for box in boxes:
@@ -142,8 +73,8 @@ class UnifiedLayoutEngine:
         for parent_id, children in parent_groups.items():
             self._layout_items_by_row(children, parent_id)
 
-    def _calculate_components_v6(self, components: List[Dict]):
-        """v6.0: 행 기반 자동 배치"""
+    def _calculate_component_positions(self, components: List[Dict]):
+        """컴포넌트 위치 계산"""
         # 부모별로 그룹화
         parent_groups = {}
         for comp in components:
@@ -157,9 +88,9 @@ class UnifiedLayoutEngine:
             self._layout_items_by_row(children, parent_id)
 
     def _layout_items_by_row(self, items: List[Dict], parent_id: str):
-        """행 기반 자동 배치 (v6.0)"""
+        """행 기반 배치"""
         # 부모 영역
-        if parent_id in self.positions:
+        if parent_id and parent_id in self.positions:
             parent_pos = self.positions[parent_id]
         else:
             parent_pos = {
@@ -173,6 +104,9 @@ class UnifiedLayoutEngine:
         row_groups = {}
         for item in items:
             row_num = item.get('row_number', 1)
+            if pd.isna(row_num):
+                row_num = 1
+            row_num = int(row_num)
             if row_num not in row_groups:
                 row_groups[row_num] = []
             row_groups[row_num].append(item)
@@ -182,13 +116,15 @@ class UnifiedLayoutEngine:
             self._layout_single_row(row_items, parent_pos)
 
     def _layout_single_row(self, items: List[Dict], parent_pos: Dict):
-        """한 행의 아이템들을 균등 배치 (v6.0)"""
+        """한 행의 아이템들을 균등 배치"""
         count = len(items)
+        if count == 0:
+            return
 
         # 사용 가능한 너비 계산
         available_width = 100 - self.LEFT_MARGIN - self.RIGHT_MARGIN
         total_gap = self.GAP * (count - 1) if count > 1 else 0
-        item_width = (available_width - total_gap) / count if count > 0 else 0
+        item_width = (available_width - total_gap) / count
 
         # 각 아이템 배치
         for i, item in enumerate(items):
@@ -197,7 +133,11 @@ class UnifiedLayoutEngine:
 
             # Y%, 높이% 가져오기
             y_percent = item.get('y_percent', 0)
+            if pd.isna(y_percent):
+                y_percent = 0
             height_percent = item.get('height_percent', 100)
+            if pd.isna(height_percent):
+                height_percent = 100
 
             # 픽셀 계산
             x_px = parent_pos['x'] + (parent_pos['width'] * (x_percent / 100))
@@ -213,3 +153,7 @@ class UnifiedLayoutEngine:
                 'width': width_px,
                 'height': height_px
             }
+
+    def detect_crossings(self, positions: Dict, connections: List[Dict]) -> int:
+        """연결선 교차 개수 추정"""
+        return 0  # 간단히 0 반환

@@ -1,61 +1,47 @@
 """
-AutoArchitect - 엑셀 파일 파서
-엑셀 파일을 읽고 검증하여 표준 Dict 구조로 변환
+AutoArchitect - Excel Parser (완전판 v6.0)
+v5.0 (X%, 너비% 기반) + v6.0 (행번호 기반) 모두 지원
+모든 메서드 포함: read_excel, validate_data, parse_to_dict
 """
 
 import pandas as pd
-from typing import Dict, List, Any, Tuple
-from pathlib import Path
+from typing import Dict, Any, List
 import io
 
-from utils.constants import (
-    EXCEL_SHEETS,
-    REQUIRED_COLUMNS,
-    VALIDATION_RULES,
-    ERROR_MESSAGES,
-    WARNING_MESSAGES,
-    COLOR_MAP,
-    BORDER_COLOR_MAP,
-    COMPONENT_STYLES,
-    CONNECTION_STYLES,
-    LAYOUT_PATTERNS
-)
 
-
-class ExcelParser:
-    """엑셀 파일 파서 및 검증"""
+class NestedExcelParser:
+    """v5.0과 v6.0 엑셀 구조 모두 지원하는 Parser (완전판)"""
 
     def __init__(self):
+        self.excel_version = None  # 'v5' 또는 'v6'
         self.errors = []
         self.warnings = []
         self.infos = []
 
-    def read_excel(self, file_path) -> Dict[str, pd.DataFrame]:
-        """
-        엑셀 파일의 모든 시트를 읽어 DataFrame Dict로 반환
+    def read_excel(self, file) -> Dict[str, pd.DataFrame]:
+        """엑셀 파일을 읽어 시트별 DataFrame 반환"""
+        sheets = {}
 
-        Args:
-            file_path: 파일 경로 또는 UploadedFile 객체 (Streamlit)
-
-        Returns:
-            {sheet_name: DataFrame} 형태의 Dict
-        """
+        # 초기화
         self.errors = []
         self.warnings = []
         self.infos = []
 
         try:
-            # Streamlit UploadedFile 처리
-            if hasattr(file_path, 'read'):
-                file_path = io.BytesIO(file_path.read())
+            # 파일 타입 확인
+            if hasattr(file, 'read'):
+                # UploadedFile 객체 (Streamlit)
+                file_content = io.BytesIO(file.read())
+                file.seek(0)  # 파일 포인터 리셋
+                excel_file = pd.ExcelFile(file_content)
+            else:
+                # 파일 경로
+                excel_file = pd.ExcelFile(file)
 
             # 모든 시트 읽기
-            excel_file = pd.ExcelFile(file_path)
-            sheets = {}
-
             for sheet_name in excel_file.sheet_names:
                 # GUIDE 시트는 제외
-                if sheet_name == EXCEL_SHEETS['GUIDE']:
+                if sheet_name == 'GUIDE':
                     continue
 
                 df = pd.read_excel(excel_file, sheet_name=sheet_name)
@@ -65,19 +51,6 @@ class ExcelParser:
 
                 sheets[sheet_name] = df
 
-            # 필수 시트 존재 확인
-            required_sheets = [
-                EXCEL_SHEETS['CONFIG'],
-                EXCEL_SHEETS['LAYERS'],
-                EXCEL_SHEETS['COMPONENTS']
-            ]
-
-            for sheet_name in required_sheets:
-                if sheet_name not in sheets:
-                    self.errors.append(
-                        ERROR_MESSAGES['missing_sheet'].format(sheet_name=sheet_name)
-                    )
-
             return sheets
 
         except Exception as e:
@@ -85,18 +58,17 @@ class ExcelParser:
             return {}
 
     def validate_data(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
-        """
-        데이터 검증
+        """데이터 검증"""
+        # 초기화 (read_excel에서 이미 했지만 안전하게)
+        if not hasattr(self, 'errors'):
+            self.errors = []
+        if not hasattr(self, 'warnings'):
+            self.warnings = []
+        if not hasattr(self, 'infos'):
+            self.infos = []
 
-        Returns:
-            {
-                'is_valid': bool,
-                'errors': List[str],
-                'warnings': List[str],
-                'infos': List[str]
-            }
-        """
-        if self.errors:  # read_excel에서 에러 발생한 경우
+        # read_excel에서 에러 발생한 경우
+        if self.errors:
             return {
                 'is_valid': False,
                 'errors': self.errors,
@@ -104,44 +76,77 @@ class ExcelParser:
                 'infos': self.infos
             }
 
-        # 1. 필수 컬럼 검증
-        self._validate_required_columns(sheets)
+        # 빈 sheets인 경우
+        if not sheets:
+            self.errors.append("엑셀 파일에서 시트를 찾을 수 없습니다.")
+            return {
+                'is_valid': False,
+                'errors': self.errors,
+                'warnings': self.warnings,
+                'infos': self.infos
+            }
 
-        # 2. CONFIG 검증
-        if EXCEL_SHEETS['CONFIG'] in sheets:
-            self._validate_config(sheets[EXCEL_SHEETS['CONFIG']])
+        # 필수 시트 확인
+        required_sheets = ['CONFIG', 'LAYERS', 'BOXES']
+        for sheet in required_sheets:
+            if sheet not in sheets:
+                self.errors.append(f"필수 시트 '{sheet}'가 없습니다.")
 
-        # 3. LAYERS 검증
-        if EXCEL_SHEETS['LAYERS'] in sheets:
-            self._validate_layers(sheets[EXCEL_SHEETS['LAYERS']])
+        if self.errors:
+            return {
+                'is_valid': False,
+                'errors': self.errors,
+                'warnings': self.warnings,
+                'infos': self.infos
+            }
 
-        # 4. COMPONENTS 검증
-        if EXCEL_SHEETS['COMPONENTS'] in sheets:
-            self._validate_components(
-                sheets[EXCEL_SHEETS['COMPONENTS']],
-                sheets.get(EXCEL_SHEETS['LAYERS'])
-            )
+        # 버전 감지
+        self._detect_version(sheets)
 
-        # 5. SUB_COMPONENTS 검증
-        if EXCEL_SHEETS['SUB_COMPONENTS'] in sheets:
-            self._validate_sub_components(
-                sheets[EXCEL_SHEETS['SUB_COMPONENTS']],
-                sheets.get(EXCEL_SHEETS['COMPONENTS'])
-            )
+        # 버전 정보 추가
+        if self.excel_version == 'v6':
+            self.infos.append("✅ v6.0 엑셀 형식 (행 기반 자동 레이아웃)")
+        else:
+            self.infos.append("✅ v5.0 엑셀 형식 (X%, 너비% 기반)")
 
-        # 6. CONNECTIONS 검증
-        if EXCEL_SHEETS['CONNECTIONS'] in sheets:
-            self._validate_connections(
-                sheets[EXCEL_SHEETS['CONNECTIONS']],
-                sheets.get(EXCEL_SHEETS['COMPONENTS'])
-            )
+        # BOXES 시트 검증
+        if 'BOXES' in sheets:
+            df = sheets['BOXES']
 
-        # 7. GROUPS 검증
-        if EXCEL_SHEETS['GROUPS'] in sheets:
-            self._validate_groups(
-                sheets[EXCEL_SHEETS['GROUPS']],
-                sheets.get(EXCEL_SHEETS['COMPONENTS'])
-            )
+            # v6.0 필수 컬럼
+            if self.excel_version == 'v6':
+                required_cols = ['박스ID', '박스명', '부모ID', '행번호', 'Y%', '높이%']
+            else:
+                # v5.0 필수 컬럼
+                required_cols = ['박스ID', '박스명', '부모ID', 'X%', 'Y%', '너비%', '높이%']
+
+            for col in required_cols:
+                if col not in df.columns:
+                    self.errors.append(f"BOXES 시트에 '{col}' 컬럼이 없습니다.")
+
+            if len(self.errors) == 0:
+                self.infos.append(f"📦 박스 개수: {len(df)}개")
+
+        # LAYERS 시트 검증
+        if 'LAYERS' in sheets:
+            df = sheets['LAYERS']
+            required_cols = ['레이어ID', '레이어명', '순서', '배경색', '높이%']
+            for col in required_cols:
+                if col not in df.columns:
+                    self.errors.append(f"LAYERS 시트에 '{col}' 컬럼이 없습니다.")
+
+            if len(self.errors) == 0:
+                self.infos.append(f"🗂️ 레이어 개수: {len(df)}개")
+
+        # COMPONENTS 시트 확인 (선택사항)
+        if 'COMPONENTS' in sheets:
+            df = sheets['COMPONENTS']
+            self.infos.append(f"📋 컴포넌트 개수: {len(df)}개")
+
+        # CONNECTIONS 시트 확인 (선택사항)
+        if 'CONNECTIONS' in sheets:
+            df = sheets['CONNECTIONS']
+            self.infos.append(f"🔗 연결 개수: {len(df)}개")
 
         return {
             'is_valid': len(self.errors) == 0,
@@ -150,396 +155,185 @@ class ExcelParser:
             'infos': self.infos
         }
 
-    def _validate_required_columns(self, sheets: Dict[str, pd.DataFrame]):
-        """필수 컬럼 존재 확인"""
-        for sheet_name, required_cols in REQUIRED_COLUMNS.items():
-            if sheet_name not in sheets:
-                continue
-
-            df = sheets[sheet_name]
-            missing_cols = set(required_cols) - set(df.columns)
-
-            if missing_cols:
-                for col in missing_cols:
-                    self.errors.append(
-                        ERROR_MESSAGES['missing_column'].format(
-                            sheet_name=sheet_name,
-                            column_name=col
-                        )
-                    )
-
-    def _validate_config(self, df: pd.DataFrame):
-        """CONFIG 시트 검증"""
-        config_dict = dict(zip(df['항목'], df['값']))
-
-        # 필수 항목 체크
-        required_items = ['다이어그램명', '캔버스너비', '캔버스높이', '레이아웃패턴']
-        for item in required_items:
-            if item not in config_dict or pd.isna(config_dict[item]):
-                self.errors.append(
-                    ERROR_MESSAGES['empty_required'].format(
-                        sheet_name='CONFIG',
-                        column_name=item
-                    )
-                )
-
-        # 레이아웃패턴 유효성 체크
-        if '레이아웃패턴' in config_dict:
-            pattern = config_dict['레이아웃패턴']
-            if pattern not in LAYOUT_PATTERNS:
-                self.errors.append(
-                    ERROR_MESSAGES['invalid_value'].format(
-                        column_name='레이아웃패턴',
-                        value=pattern,
-                        allowed=', '.join(LAYOUT_PATTERNS)
-                    )
-                )
-
-    def _validate_layers(self, df: pd.DataFrame):
-        """LAYERS 시트 검증"""
-        # ID 중복 체크
-        layer_ids = df['레이어ID'].dropna()
-        duplicates = layer_ids[layer_ids.duplicated()].unique()
-
-        for dup_id in duplicates:
-            self.errors.append(
-                ERROR_MESSAGES['duplicate_id'].format(
-                    id_type='레이어',
-                    id_value=dup_id
-                )
-            )
-
-        # 높이% 합계 체크
-        heights = df['높이%'].dropna()
-        total_height = heights.sum()
-        tolerance = VALIDATION_RULES['height_percent_tolerance']
-
-        if not (100 - tolerance <= total_height <= 100 + tolerance):
-            self.warnings.append(
-                ERROR_MESSAGES['height_sum_error'].format(
-                    sum=total_height,
-                    tolerance=tolerance
-                )
-            )
-
-        # 레이어 개수 체크
-        if len(df) > VALIDATION_RULES['max_layers']:
-            self.warnings.append(
-                f"레이어가 {len(df)}개입니다. {VALIDATION_RULES['max_layers']}개 이하 권장"
-            )
-
-        # 색상 유효성 체크
-        for idx, row in df.iterrows():
-            bg_color = row.get('배경색')
-            if pd.notna(bg_color) and bg_color not in COLOR_MAP:
-                self.errors.append(
-                    ERROR_MESSAGES['invalid_value'].format(
-                        column_name=f'배경색 (행 {idx + 2})',
-                        value=bg_color,
-                        allowed=', '.join(COLOR_MAP.keys())
-                    )
-                )
-
-            border_color = row.get('테두리색')
-            if pd.notna(border_color) and border_color not in BORDER_COLOR_MAP:
-                self.errors.append(
-                    ERROR_MESSAGES['invalid_value'].format(
-                        column_name=f'테두리색 (행 {idx + 2})',
-                        value=border_color,
-                        allowed=', '.join(BORDER_COLOR_MAP.keys())
-                    )
-                )
-
-    def _validate_components(self, df: pd.DataFrame, layers_df: pd.DataFrame = None):
-        """COMPONENTS 시트 검증"""
-        # ID 중복 체크
-        comp_ids = df['ID'].dropna()
-        duplicates = comp_ids[comp_ids.duplicated()].unique()
-
-        for dup_id in duplicates:
-            self.errors.append(
-                ERROR_MESSAGES['duplicate_id'].format(
-                    id_type='컴포넌트',
-                    id_value=dup_id
-                )
-            )
-
-        # 레이어ID 참조 무결성 체크
-        if layers_df is not None:
-            valid_layer_ids = set(layers_df['레이어ID'].dropna())
-
-            for idx, row in df.iterrows():
-                layer_id = row.get('레이어ID')
-                if pd.notna(layer_id) and layer_id not in valid_layer_ids:
-                    self.errors.append(
-                        ERROR_MESSAGES['invalid_reference'].format(
-                            ref_type=f'컴포넌트 {row["ID"]}',
-                            id_value=layer_id
-                        )
-                    )
-
-        # 타입 유효성 체크
-        valid_types = list(COMPONENT_STYLES.keys())
-        for idx, row in df.iterrows():
-            comp_type = row.get('타입')
-            if pd.notna(comp_type) and comp_type not in valid_types:
-                self.errors.append(
-                    ERROR_MESSAGES['invalid_value'].format(
-                        column_name=f'타입 (행 {idx + 2})',
-                        value=comp_type,
-                        allowed=', '.join(valid_types)
-                    )
-                )
-
-        # 너비 범위 체크
-        width_range = VALIDATION_RULES['width_range']
-        for idx, row in df.iterrows():
-            width = row.get('너비')
-            if pd.notna(width):
-                if not (width_range[0] <= width <= width_range[1]):
-                    self.errors.append(
-                        f"컴포넌트 {row['ID']}의 너비({width})는 "
-                        f"{width_range[0]}-{width_range[1]} 범위여야 합니다"
-                    )
-
-        # 컴포넌트 개수 경고
-        if len(df) > VALIDATION_RULES['max_components']:
-            self.warnings.append(
-                WARNING_MESSAGES['too_many_components'].format(
-                    count=len(df),
-                    max=VALIDATION_RULES['max_components']
-                )
-            )
-
-    def _validate_sub_components(self, df: pd.DataFrame, components_df: pd.DataFrame = None):
-        """SUB_COMPONENTS 시트 검증"""
-        if components_df is None:
-            return
-
-        valid_comp_ids = set(components_df['ID'].dropna())
-
-        # 부모ID 참조 무결성 체크
-        for idx, row in df.iterrows():
-            parent_id = row.get('부모ID')
-            if pd.notna(parent_id) and parent_id not in valid_comp_ids:
-                self.errors.append(
-                    ERROR_MESSAGES['invalid_reference'].format(
-                        ref_type='서브컴포넌트',
-                        id_value=parent_id
-                    )
-                )
-
-            # 부모가 클러스터 타입인지 확인
-            if pd.notna(parent_id) and parent_id in valid_comp_ids:
-                parent_row = components_df[components_df['ID'] == parent_id].iloc[0]
-                if parent_row['타입'] != '클러스터':
-                    self.warnings.append(
-                        f"컴포넌트 {parent_id}는 클러스터 타입이 아닙니다. "
-                        f"서브컴포넌트를 추가하려면 타입을 '클러스터'로 변경하세요."
-                    )
-
-        # 서브컴포넌트 개수 체크
-        sub_counts = df['부모ID'].value_counts()
-        max_subs = VALIDATION_RULES['max_sub_components_per_parent']
-
-        for parent_id, count in sub_counts.items():
-            if count > max_subs:
-                self.warnings.append(
-                    f"컴포넌트 {parent_id}의 서브컴포넌트가 {count}개입니다. "
-                    f"{max_subs}개 이하 권장"
-                )
-
-    def _validate_connections(self, df: pd.DataFrame, components_df: pd.DataFrame = None):
-        """CONNECTIONS 시트 검증"""
-        if components_df is None:
-            return
-
-        valid_comp_ids = set(components_df['ID'].dropna())
-
-        # 참조 무결성 체크
-        for idx, row in df.iterrows():
-            from_id = row.get('출발ID')
-            to_id = row.get('도착ID')
-
-            if pd.notna(from_id) and from_id not in valid_comp_ids:
-                self.errors.append(
-                    ERROR_MESSAGES['invalid_reference'].format(
-                        ref_type='연결 출발',
-                        id_value=from_id
-                    )
-                )
-
-            if pd.notna(to_id) and to_id not in valid_comp_ids:
-                self.errors.append(
-                    ERROR_MESSAGES['invalid_reference'].format(
-                        ref_type='연결 도착',
-                        id_value=to_id
-                    )
-                )
-
-            # 자기 자신으로의 연결 경고
-            if pd.notna(from_id) and pd.notna(to_id) and from_id == to_id:
-                self.warnings.append(
-                    WARNING_MESSAGES['self_connection'].format(id=from_id)
-                )
-
-        # 연결 타입 유효성 체크
-        valid_conn_types = list(CONNECTION_STYLES.keys())
-        for idx, row in df.iterrows():
-            conn_type = row.get('연결타입')
-            if pd.notna(conn_type) and conn_type not in valid_conn_types:
-                self.errors.append(
-                    ERROR_MESSAGES['invalid_value'].format(
-                        column_name=f'연결타입 (행 {idx + 2})',
-                        value=conn_type,
-                        allowed=', '.join(valid_conn_types)
-                    )
-                )
-
-        # 연결 개수 경고
-        if len(df) > VALIDATION_RULES['max_connections']:
-            self.warnings.append(
-                WARNING_MESSAGES['too_many_connections'].format(count=len(df))
-            )
-
-    def _validate_groups(self, df: pd.DataFrame, components_df: pd.DataFrame = None):
-        """GROUPS 시트 검증"""
-        if components_df is None:
-            return
-
-        valid_comp_ids = set(components_df['ID'].dropna())
-
-        # 그룹ID 중복 체크
-        group_ids = df['그룹ID'].dropna()
-        duplicates = group_ids[group_ids.duplicated()].unique()
-
-        for dup_id in duplicates:
-            self.errors.append(
-                ERROR_MESSAGES['duplicate_id'].format(
-                    id_type='그룹',
-                    id_value=dup_id
-                )
-            )
-
-        # 포함컴포넌트 참조 무결성 체크
-        for idx, row in df.iterrows():
-            comp_ids_str = row.get('포함컴포넌트(IDs)')
-            if pd.notna(comp_ids_str):
-                comp_ids = [cid.strip() for cid in str(comp_ids_str).split(',')]
-
-                for comp_id in comp_ids:
-                    if comp_id and comp_id not in valid_comp_ids:
-                        self.errors.append(
-                            ERROR_MESSAGES['invalid_reference'].format(
-                                ref_type=f'그룹 {row["그룹ID"]}',
-                                id_value=comp_id
-                            )
-                        )
+    def _detect_version(self, sheets: Dict[str, pd.DataFrame]):
+        """엑셀 버전 자동 감지"""
+        if 'BOXES' in sheets:
+            df = sheets['BOXES']
+            # v6.0은 '행번호' 컬럼이 있고 'X%'가 없음
+            if '행번호' in df.columns and 'X%' not in df.columns:
+                self.excel_version = 'v6'
+                print("📋 v6.0 엑셀 형식 감지 (행 기반)")
+            else:
+                self.excel_version = 'v5'
+                print("📋 v5.0 엑셀 형식 감지 (X%, 너비% 기반)")
 
     def parse_to_dict(self, sheets: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
-        """
-        검증된 데이터를 표준 Dict 구조로 변환
+        """엑셀 시트를 딕셔너리로 변환 (v5/v6 자동 감지)"""
 
-        Returns:
-            {
-                'config': {...},
-                'layers': [{...}, ...],
-                'components': [{...}, ...],
-                'sub_components': [{...}, ...],
-                'connections': [{...}, ...],
-                'groups': [{...}, ...]
-            }
-        """
+        # 버전 자동 감지 (아직 안했으면)
+        if self.excel_version is None:
+            self._detect_version(sheets)
+
         result = {
             'config': {},
             'layers': [],
+            'boxes': [],
             'components': [],
-            'sub_components': [],
             'connections': [],
             'groups': []
         }
 
         # CONFIG 파싱
-        if EXCEL_SHEETS['CONFIG'] in sheets:
-            config_df = sheets[EXCEL_SHEETS['CONFIG']]
-            result['config'] = dict(zip(config_df['항목'], config_df['값']))
+        if 'CONFIG' in sheets:
+            result['config'] = self._parse_config(sheets['CONFIG'])
 
         # LAYERS 파싱
-        if EXCEL_SHEETS['LAYERS'] in sheets:
-            layers_df = sheets[EXCEL_SHEETS['LAYERS']]
-            result['layers'] = [
-                {
-                    'id': row['레이어ID'],
-                    'name': row['레이어명'],
-                    'height_percent': row['높이%'],
-                    'bg_color': row['배경색'],
-                    'border_color': row.get('테두리색', '검정')
-                }
-                for _, row in layers_df.iterrows()
-                if pd.notna(row['레이어ID'])
-            ]
+        if 'LAYERS' in sheets:
+            result['layers'] = self._parse_layers(sheets['LAYERS'])
 
-        # COMPONENTS 파싱
-        if EXCEL_SHEETS['COMPONENTS'] in sheets:
-            comp_df = sheets[EXCEL_SHEETS['COMPONENTS']]
-            result['components'] = [
-                {
-                    'id': row['ID'],
-                    'name': row['컴포넌트명'],
-                    'layer_id': row['레이어ID'],
-                    'type': row['타입'],
-                    'width': row['너비'],
-                    'icon': row.get('아이콘'),
-                    'text_size': row.get('텍스트크기', '중간')
-                }
-                for _, row in comp_df.iterrows()
-                if pd.notna(row['ID'])
-            ]
+        # BOXES 파싱 (버전별 처리)
+        if 'BOXES' in sheets:
+            result['boxes'] = self._parse_boxes(sheets['BOXES'])
 
-        # SUB_COMPONENTS 파싱
-        if EXCEL_SHEETS['SUB_COMPONENTS'] in sheets:
-            sub_df = sheets[EXCEL_SHEETS['SUB_COMPONENTS']]
-            result['sub_components'] = [
-                {
-                    'parent_id': row['부모ID'],
-                    'name': row['서브컴포넌트명'],
-                    'order': row['순서']
-                }
-                for _, row in sub_df.iterrows()
-                if pd.notna(row['부모ID'])
-            ]
+        # COMPONENTS 파싱 (버전별 처리)
+        if 'COMPONENTS' in sheets:
+            result['components'] = self._parse_components(sheets['COMPONENTS'])
 
         # CONNECTIONS 파싱
-        if EXCEL_SHEETS['CONNECTIONS'] in sheets:
-            conn_df = sheets[EXCEL_SHEETS['CONNECTIONS']]
-            result['connections'] = [
-                {
-                    'from_id': row['출발ID'],
-                    'to_id': row['도착ID'],
-                    'type': row['연결타입'],
-                    'label': row.get('라벨', ''),
-                    'style': row.get('선스타일', '실선')
-                }
-                for _, row in conn_df.iterrows()
-                if pd.notna(row['출발ID']) and pd.notna(row['도착ID'])
-            ]
+        if 'CONNECTIONS' in sheets:
+            result['connections'] = self._parse_connections(sheets['CONNECTIONS'])
 
-        # GROUPS 파싱
-        if EXCEL_SHEETS['GROUPS'] in sheets:
-            group_df = sheets[EXCEL_SHEETS['GROUPS']]
-            result['groups'] = [
-                {
-                    'id': row['그룹ID'],
-                    'name': row['그룹명'],
-                    'component_ids': [
-                        cid.strip()
-                        for cid in str(row['포함컴포넌트(IDs)']).split(',')
-                    ],
-                    'border_style': row.get('테두리스타일', '검정실선'),
-                    'bg_opacity': row.get('배경투명도', '5%')
-                }
-                for _, row in group_df.iterrows()
-                if pd.notna(row['그룹ID'])
-            ]
+        # GROUPS 파싱 (있으면)
+        if 'GROUPS' in sheets:
+            result['groups'] = self._parse_groups(sheets['GROUPS'])
 
         return result
+
+    def _parse_config(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """CONFIG 시트 파싱"""
+        config = {}
+        for _, row in df.iterrows():
+            key = row['항목']
+            value = row['값']
+            if pd.notna(key):
+                config[key] = value
+        return config
+
+    def _parse_layers(self, df: pd.DataFrame) -> List[Dict]:
+        """LAYERS 시트 파싱"""
+        layers = []
+        for _, row in df.iterrows():
+            if pd.isna(row.get('레이어ID')):
+                continue
+
+            layer = {
+                'id': row['레이어ID'],
+                'name': row['레이어명'],
+                'order': row.get('순서', 1),
+                'bg_color': row.get('배경색', '흰색'),
+                'height_percent': row['높이%']
+            }
+            layers.append(layer)
+        return layers
+
+    def _parse_boxes(self, df: pd.DataFrame) -> List[Dict]:
+        """BOXES 시트 파싱 (v5/v6 자동 처리)"""
+        boxes = []
+
+        for _, row in df.iterrows():
+            if pd.isna(row.get('박스ID')):
+                continue
+
+            box = {
+                'id': row['박스ID'],
+                'name': row['박스명'],
+                'parent_id': row['부모ID'],
+                'y_percent': row['Y%'],
+                'height_percent': row['높이%'],
+                'bg_color': row.get('배경색', '흰색'),
+                'border_color': row.get('테두리색', '회색'),
+                'font_size': row.get('폰트크기', 11)
+            }
+
+            # 버전별 추가 필드
+            if self.excel_version == 'v6':
+                # v6.0: 행번호 사용
+                box['row_number'] = row.get('행번호', 1)
+                # x_percent, width_percent는 Layout Engine에서 자동 계산
+            else:
+                # v5.0: X%, 너비% 직접 사용
+                box['x_percent'] = row.get('X%', 0)
+                box['width_percent'] = row.get('너비%', 100)
+
+            boxes.append(box)
+
+        return boxes
+
+    def _parse_components(self, df: pd.DataFrame) -> List[Dict]:
+        """COMPONENTS 시트 파싱 (v5/v6 자동 처리)"""
+        components = []
+
+        for _, row in df.iterrows():
+            if pd.isna(row.get('ID')):
+                continue
+
+            comp = {
+                'id': row['ID'],
+                'name': row['컴포넌트명'],
+                'parent_id': row['부모ID'],
+                'y_percent': row['Y%'],
+                'height_percent': row['높이%'],
+                'font_size': row.get('폰트크기', 10),
+                'type': row.get('타입', '단일박스')
+            }
+
+            # 버전별 추가 필드
+            if self.excel_version == 'v6':
+                # v6.0: 행번호 사용
+                comp['row_number'] = row.get('행번호', 1)
+            else:
+                # v5.0: X%, 너비% 직접 사용
+                comp['x_percent'] = row.get('X%', 0)
+                comp['width_percent'] = row.get('너비%', 100)
+
+            components.append(comp)
+
+        return components
+
+    def _parse_connections(self, df: pd.DataFrame) -> List[Dict]:
+        """CONNECTIONS 시트 파싱"""
+        connections = []
+
+        for _, row in df.iterrows():
+            if pd.isna(row.get('출발ID')) or pd.isna(row.get('도착ID')):
+                continue
+
+            conn = {
+                'from_id': row['출발ID'],
+                'to_id': row['도착ID'],
+                'type': row.get('연결타입', '데이터흐름'),
+                'label': row.get('라벨', ''),
+                'style': row.get('선스타일', '실선')
+            }
+            connections.append(conn)
+
+        return connections
+
+    def _parse_groups(self, df: pd.DataFrame) -> List[Dict]:
+        """GROUPS 시트 파싱"""
+        groups = []
+
+        for _, row in df.iterrows():
+            if pd.isna(row.get('그룹ID')):
+                continue
+
+            group = {
+                'id': row['그룹ID'],
+                'name': row.get('그룹명', ''),
+                'component_ids': str(row.get('포함컴포넌트(IDs)', '')).split(','),
+                'border_style': row.get('테두리스타일', '검정실선'),
+                'bg_opacity': row.get('배경투명도', '5%')
+            }
+            groups.append(group)
+
+        return groups
